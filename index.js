@@ -5,31 +5,41 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 
 const app = express();
-app.use(cors()); // Allow requests from frontend
+app.use(cors());
 app.use(bodyParser.json());
 
-const usersSession = {}; // Track user sessions
+const usersSession = {};
+const userProfiles = {}; 
+const orders = {}; 
+const adminOrders = []; 
+const loyaltyPoints = {}; 
 
-// Menu Items
+// Menu Items with Variations
 const MENU_ITEMS = {
-    1: { name: "Pani Puri", price: 20 },
-    2: { name: "Bhel Puri", price: 30 },
-    3: { name: "Sev Puri", price: 25 },
-    4: { name: "Dahi Puri", price: 35 }
+    1: { name: "Pani Puri", variations: { small: 20, large: 35 } },
+    2: { name: "Bhel Puri", variations: { regular: 30, spicy: 35 } },
+    3: { name: "Sev Puri", variations: { regular: 25, extra_cheese: 30 } },
+    4: { name: "Dahi Puri", variations: { regular: 35, extra_dahi: 40 } }
 };
 
-// WhatsApp API URL
 const WHATSAPP_URL = `https://graph.facebook.com/v21.0/${process.env.PHONE_NUMBER_ID}/messages`;
 
-// Function to send a message via WhatsApp API
-async function sendMessage(to, message) {
+async function sendMessage(to, message, buttons = []) {
     try {
-        await axios.post(WHATSAPP_URL, {
+        let payload = {
             messaging_product: "whatsapp",
             to,
-            type: "text",
-            text: { body: message }
-        }, {
+            type: buttons.length > 0 ? "interactive" : "text",
+            interactive: buttons.length > 0
+                ? {
+                    type: "button",
+                    body: { text: message },
+                    action: { buttons: buttons.map(label => ({ type: "reply", reply: { id: label.toLowerCase(), title: label } })) }
+                }
+                : { text: message }
+        };
+
+        await axios.post(WHATSAPP_URL, payload, {
             headers: {
                 Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
                 "Content-Type": "application/json"
@@ -40,17 +50,17 @@ async function sendMessage(to, message) {
     }
 }
 
-// Generate Menu Message
 function getMenuMessage() {
-    let menuMessage = "🍽️ *Menu:*\n";
+    let message = "🍽️ *Menu:*\n";
     for (let id in MENU_ITEMS) {
-        menuMessage += `*${id}*. ${MENU_ITEMS[id].name} - ₹${MENU_ITEMS[id].price}\n`;
+        message += `*${id}*. ${MENU_ITEMS[id].name}\n`;
+        Object.keys(MENU_ITEMS[id].variations).forEach(variation => {
+            message += `   - ${variation}: ₹${MENU_ITEMS[id].variations[variation]}\n`;
+        });
     }
-    menuMessage += "\n🛒 To order, type: <index> <quantity> (e.g., *1 2* for 2 Pani Puris)\n\n✅ Type *done* to confirm order.";
-    return menuMessage;
+    return message + "\n🛒 Click below to view menu or cart.";
 }
 
-// WhatsApp Webhook Verification
 app.get('/webhook', (req, res) => {
     if (req.query["hub.verify_token"] === process.env.VERIFY_TOKEN) {
         res.send(req.query["hub.challenge"]);
@@ -59,10 +69,8 @@ app.get('/webhook', (req, res) => {
     }
 });
 
-// Handle Incoming WhatsApp Messages
 app.post('/webhook', async (req, res) => {
     const messageData = req.body;
-
     if (messageData.object) {
         const messages = messageData.entry?.[0]?.changes?.[0]?.value?.messages;
         if (messages) {
@@ -72,75 +80,95 @@ app.post('/webhook', async (req, res) => {
 
                 if (!usersSession[from]) {
                     usersSession[from] = { stage: "greeting", order: [] };
-                    await sendMessage(from, "🌟 *Welcome to Puchka Das!* 🌟\n\n🍽️ Type *menu* to see our delicious items.");
+                    await sendMessage(from, "🌟 Welcome to Puchka Das! 🌟", ["Menu", "Cart", "Loyalty Points"]);
                     continue;
                 }
 
                 if (text === "menu") {
                     usersSession[from].stage = "ordering";
-                    await sendMessage(from, getMenuMessage());
+                    await sendMessage(from, getMenuMessage(), ["Add to Cart", "View Cart"]);
+                    continue;
+                }
+
+                if (text === "cart") {
+                    let cartMessage = "🛒 *Your Cart:*\n";
+                    let total = 0;
+                    usersSession[from].order.forEach(item => {
+                        cartMessage += `- ${item.quantity}x ${item.name} (${item.variation}) - ₹${item.price * item.quantity}\n`;
+                        total += item.price * item.quantity;
+                    });
+                    cartMessage += `\n💰 *Total: ₹${total}*`;
+                    await sendMessage(from, cartMessage, ["Confirm Order", "Modify Order"]);
                     continue;
                 }
 
                 if (usersSession[from].stage === "ordering") {
-                    const orderMatch = text.match(/^(\d+)\s+(\d+)$/);
+                    const match = text.match(/^\s*(\d+)\s+(\w+)\s+(\d+)\s*$/i);
+                    if (match) {
+                        const id = parseInt(match[1]);
+                        const variation = match[2].toLowerCase();
+                        const qty = parseInt(match[3]);
 
-                    if (orderMatch) {
-                        const index = parseInt(orderMatch[1]);
-                        const quantity = parseInt(orderMatch[2]);
-
-                        if (MENU_ITEMS[index]) {
-                            usersSession[from].order.push({ item: MENU_ITEMS[index], quantity });
-                            await sendMessage(from, `✅ *${quantity}x ${MENU_ITEMS[index].name}* added to cart.\n\n🛍️ Type *done* to confirm.`);
+                        if (MENU_ITEMS[id] && MENU_ITEMS[id].variations[variation]) {
+                            usersSession[from].order.push({ 
+                                name: MENU_ITEMS[id].name, 
+                                variation, 
+                                price: MENU_ITEMS[id].variations[variation], 
+                                quantity: qty 
+                            });
+                            await sendMessage(from, `✅ ${qty}x ${MENU_ITEMS[id].name} (${variation}) added to cart.`, ["View Cart", "Checkout"]);
                         } else {
-                            await sendMessage(from, "❌ Invalid item number. Type *menu* to see items.");
+                            await sendMessage(from, "❌ Invalid item or variation. Type *menu* to see options.");
                         }
-                    } else if (text === "done") {
-                        if (usersSession[from].order.length === 0) {
-                            await sendMessage(from, "🛒 Your cart is empty!");
-                            continue;
-                        }
+                    }
+                }
 
-                        let totalAmount = 0;
-                        let orderSummary = "🛒 *Order Summary:*\n";
-                        usersSession[from].order.forEach(order => {
-                            orderSummary += `- ${order.quantity}x ${order.item.name} - ₹${order.item.price * order.quantity}\n`;
-                            totalAmount += order.item.price * order.quantity;
-                        });
-                        orderSummary += `\n💰 *Total: ₹${totalAmount}*\n\n🎉 Thank you for ordering! 🎊`;
+                if (text === "checkout") {
+                    if (usersSession[from].order.length === 0) {
+                        await sendMessage(from, "🛒 Your cart is empty!");
+                        continue;
+                    }
+                    let totalAmount = 0;
+                    let summary = "🛒 *Order Summary:*\n";
+                    usersSession[from].order.forEach(item => {
+                        summary += `- ${item.quantity}x ${item.name} (${item.variation}) - ₹${item.price * item.quantity}\n`;
+                        totalAmount += item.price * item.quantity;
+                    });
+                    summary += `\n💰 *Total: ₹${totalAmount}*\n✅ Confirm order?`;
+                    await sendMessage(from, summary, ["Confirm", "Cancel"]);
+                    continue;
+                }
 
-                        await sendMessage(from, orderSummary);
-                        delete usersSession[from]; // Reset session
+                if (text === "confirm") {
+                    orders[from] = usersSession[from].order;
+                    adminOrders.push({ user: from, order: usersSession[from].order });
+
+                    loyaltyPoints[from] = (loyaltyPoints[from] || 0) + 10; 
+                    await sendMessage(from, "🎉 Order confirmed! You earned *10 loyalty points*! We’ll notify you when it’s ready. 🍽️", ["Track Order"]);
+                    delete usersSession[from];
+                    continue;
+                }
+
+                if (text === "track order") {
+                    if (orders[from]) {
+                        await sendMessage(from, "🚚 Your order is being prepared! 🍽️ Estimated time: 20 min.");
+                    } else {
+                        await sendMessage(from, "❌ No active orders found.");
                     }
                     continue;
                 }
 
-                await sendMessage(from, "🤖 I didn't understand. Type *menu* to see options.");
+                if (text === "loyalty points") {
+                    let points = loyaltyPoints[from] || 0;
+                    await sendMessage(from, `🏆 *Your Loyalty Points:* ${points} points!`, ["Menu", "Cart"]);
+                    continue;
+                }
+
+                await sendMessage(from, "🤖 I didn't understand. Type *menu* to see options.", ["Menu", "Cart"]);
             }
         }
     }
     res.sendStatus(200);
 });
 
-// **Route to Receive Orders from Frontend**
-app.post('/send-order', async (req, res) => {
-    const { phoneNumber, order } = req.body;
-
-    if (!phoneNumber || order.length === 0) {
-        return res.status(400).json({ error: "Invalid order data" });
-    }
-
-    let orderText = order.map(item => `${item.name} - ₹${item.price}`).join("\n");
-    let message = `🌟 Order from Puchka Das:\n${orderText}\nTotal: ₹${order.reduce((total, item) => total + item.price, 0)}`;
-
-    try {
-        await sendMessage(phoneNumber, message);
-        res.json({ success: true, message: "Order sent successfully!" });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: "Failed to send WhatsApp message" });
-    }
-});
-
-// Start Server on Port 3001
 app.listen(3001, () => console.log("🚀 WhatsApp bot running on port 3001"));
