@@ -77,6 +77,9 @@ app.post('/webhook', async (req, res) => {
             for (const message of messages) {
                 const from = message.from;
                 const text = message.text?.body?.toLowerCase().trim();
+                const buttonId = message.interactive?.button_reply?.id; // 🔥 Handle button clicks properly
+
+                const userInput = buttonId || text; // If button was clicked, use its ID instead
 
                 if (!usersSession[from]) {
                     usersSession[from] = { stage: "greeting", order: [] };
@@ -84,13 +87,13 @@ app.post('/webhook', async (req, res) => {
                     continue;
                 }
 
-                if (text === "menu") {
+                if (userInput === "menu") {
                     usersSession[from].stage = "ordering";
                     await sendMessage(from, getMenuMessage(), ["Add to Cart", "View Cart"]);
                     continue;
                 }
 
-                if (text === "cart") {
+                if (userInput === "cart") {
                     let cartMessage = "🛒 *Your Cart:*\n";
                     let total = 0;
                     usersSession[from].order.forEach(item => {
@@ -102,28 +105,7 @@ app.post('/webhook', async (req, res) => {
                     continue;
                 }
 
-                if (usersSession[from].stage === "ordering") {
-                    const match = text.match(/^\s*(\d+)\s+(\w+)\s+(\d+)\s*$/i);
-                    if (match) {
-                        const id = parseInt(match[1]);
-                        const variation = match[2].toLowerCase();
-                        const qty = parseInt(match[3]);
-
-                        if (MENU_ITEMS[id] && MENU_ITEMS[id].variations[variation]) {
-                            usersSession[from].order.push({ 
-                                name: MENU_ITEMS[id].name, 
-                                variation, 
-                                price: MENU_ITEMS[id].variations[variation], 
-                                quantity: qty 
-                            });
-                            await sendMessage(from, `✅ ${qty}x ${MENU_ITEMS[id].name} (${variation}) added to cart.`, ["View Cart", "Checkout"]);
-                        } else {
-                            await sendMessage(from, "❌ Invalid item or variation. Type *menu* to see options.");
-                        }
-                    }
-                }
-
-                if (text === "checkout") {
+                if (userInput === "checkout") {
                     if (usersSession[from].order.length === 0) {
                         await sendMessage(from, "🛒 Your cart is empty!");
                         continue;
@@ -139,7 +121,7 @@ app.post('/webhook', async (req, res) => {
                     continue;
                 }
 
-                if (text === "confirm") {
+                if (userInput === "confirm") {
                     orders[from] = usersSession[from].order;
                     adminOrders.push({ user: from, order: usersSession[from].order });
 
@@ -149,7 +131,7 @@ app.post('/webhook', async (req, res) => {
                     continue;
                 }
 
-                if (text === "track order") {
+                if (userInput === "track order") {
                     if (orders[from]) {
                         await sendMessage(from, "🚚 Your order is being prepared! 🍽️ Estimated time: 20 min.");
                     } else {
@@ -158,7 +140,7 @@ app.post('/webhook', async (req, res) => {
                     continue;
                 }
 
-                if (text === "loyalty points") {
+                if (userInput === "loyalty points") {
                     let points = loyaltyPoints[from] || 0;
                     await sendMessage(from, `🏆 *Your Loyalty Points:* ${points} points!`, ["Menu", "Cart"]);
                     continue;
@@ -170,5 +152,6 @@ app.post('/webhook', async (req, res) => {
     }
     res.sendStatus(200);
 });
+
 
 app.listen(3001, () => console.log("🚀 WhatsApp bot running on port 3001"));
